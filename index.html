@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>WebUSB Demo — Safe Dev Tool</title>
+<style>
+  body{font-family:system-ui,Segoe UI,Roboto,Arial;line-height:1.4;margin:18px;}
+  button{padding:.5rem 1rem;margin:.25rem 0;}
+  pre{background:#f4f4f4;padding:12px;border-radius:6px;overflow:auto}
+  label{display:block;margin-top:8px}
+</style>
+</head>
+<body>
+  <h1>WebUSB demo — device explorer</h1>
+  <p>Use this for legal development/debugging only. It will request a device and show basic info and simple transfer examples.</p>
+
+  <button id="btnRequest">Request device</button>
+  <button id="btnList" disabled>List currently authorized devices</button>
+  <button id="btnClose" disabled>Close device</button>
+
+  <div id="deviceInfo"></div>
+
+  <hr />
+
+  <label>Endpoint / transfer (must match device interface):
+    <input id="endpoint" type="number" value="1" style="width:6rem" />
+  </label>
+
+  <label>Data to send (hex, e.g. 01 02 03):
+    <input id="dataToSend" type="text" value="01 02 03" style="width:80%" />
+  </label>
+
+  <button id="btnSend" disabled>Send (transferOut)</button>
+  <button id="btnRecv" disabled>Receive (transferIn)</button>
+
+  <h3>Log</h3>
+  <pre id="log">ready.</pre>
+
+<script>
+const logEl = document.getElementById('log');
+function log(...args){ logEl.textContent += '\n' + args.map(a=>typeof a === 'object'? JSON.stringify(a,null,2): String(a)).join(' '); logEl.scrollTop = logEl.scrollHeight; }
+
+let device = null;
+
+async function requestDevice(){
+  try{
+    // Filter left intentionally permissive to let you choose your device.
+    // Consider restricting filters to known vendorId/productId for safety.
+    const filters = [
+      // Example: { vendorId: 0x045e, productId: 0x0629 } // replace with your device
+    ];
+    const opts = filters.length ? { filters } : { acceptAllDevices: true };
+    device = await navigator.usb.requestDevice(opts);
+    log('Device chosen:', device.productName || '(no product name)', 'vendorId=', device.vendorId, 'productId=', device.productId);
+    await openAndClaim(device);
+    document.getElementById('btnList').disabled = false;
+    document.getElementById('btnClose').disabled = false;
+    document.getElementById('btnSend').disabled = false;
+    document.getElementById('btnRecv').disabled = false;
+    showDeviceInfo();
+  }catch(err){
+    log('requestDevice error:', err.message || err);
+  }
+}
+
+async function openAndClaim(dev){
+  if(!dev) throw new Error('no device');
+  if(!dev.opened) await dev.open();
+  log('Opened device.');
+  // Attempt to select first configuration if not already set
+  if(dev.configuration === null && dev.configurations && dev.configurations.length){
+    try{
+      await dev.selectConfiguration(dev.configurations[0].configurationValue);
+      log('Selected configuration', dev.configurations[0].configurationValue);
+    }catch(e){ log('selectConfiguration failed:', e.message || e); }
+  }
+  // Claim first interface that has endpoints
+  const iface = (dev.configuration && dev.configuration.interfaces.find(i=>i.alternates && i.alternates.some(a=>a.endpoints && a.endpoints.length))) || null;
+  if(iface){
+    try{
+      await dev.claimInterface(iface.interfaceNumber);
+      log('Claimed interface', iface.interfaceNumber);
+    }catch(e){ log('claimInterface failed:', e.message || e); }
+  } else {
+    log('No claimable interface found automatically.');
+  }
+}
+
+function showDeviceInfo(){
+  if(!device){ document.getElementById('deviceInfo').textContent = 'No device'; return; }
+  const cfg = device.configuration;
+  let s = `Product: ${device.productName || 'N/A'}\nVendorId: 0x${device.vendorId.toString(16)} ProductId: 0x${device.productId.toString(16)}\n`;
+  if(cfg){
+    s += `Configuration: ${cfg.configurationValue}\n`;
+    cfg.interfaces.forEach(i=>{
+      s += `Interface ${i.interfaceNumber}:\n`;
+      i.alternates.forEach(a=>{
+        s += `  Alternate ${a.alternateSetting} - Class ${a.interfaceClass}, endpoints: ${a.endpoints.map(ep=>ep.endpointNumber+'('+ep.direction+')').join(', ')}\n`;
+      });
+    });
+  }
+  document.getElementById('deviceInfo').innerHTML = `<pre>${s}</pre>`;
+}
+
+async function listDevices(){
+  try{
+    const devices = await navigator.usb.getDevices();
+    log('Authorized devices count:', devices.length);
+    devices.forEach(d => log(' -', d.productName || 'unknown', 'vid=0x'+d.vendorId.toString(16), 'pid=0x'+d.productId.toString(16)));
+  }catch(e){ log('getDevices error:', e.message || e); }
+}
+
+async function closeDevice(){
+  if(!device) return log('no device to close');
+  try{
+    await device.close();
+    log('Device closed.');
+    device = null;
+    showDeviceInfo();
+    document.getElementById('btnSend').disabled = true;
+    document.getElementById('btnRecv').disabled = true;
+    document.getElementById('btnClose').disabled = true;
+  }catch(e){ log('close error:', e.message || e); }
+}
+
+function hexStringToUint8Array(hex){
+  hex = hex.replace(/[^0-9a-fA-F]/g,'');
+  if(hex.length % 2) hex = '0' + hex;
+  const out = new Uint8Array(hex.length/2);
+  for(let i=0;i<out.length;i++) out[i] = parseInt(hex.substr(i*2,2),16);
+  return out;
+}
+
+async function sendTransfer(){
+  if(!device || !device.opened) return log('device not open');
+  const ep = Number(document.getElementById('endpoint').value);
+  const dataHex = document.getElementById('dataToSend').value;
+  const data = hexStringToUint8Array(dataHex);
+  try{
+    // Using transferOut on endpoint number (direction OUT). The endpoint number must match device.
+    const result = await device.transferOut(ep, data);
+    log('transferOut result:', result.status, 'bytesWritten:', result.bytesWritten);
+  }catch(e){ log('transferOut error:', e.message || e); }
+}
+
+async function recvTransfer(){
+  if(!device || !device.opened) return log('device not open');
+  const ep = Number(document.getElementById('endpoint').value);
+  try{
+    // read up to 64 bytes; adjust as appropriate
+    const result = await device.transferIn(ep, 64);
+    if(result.status === 'ok' && result.data){
+      const arr = new Uint8Array(result.data.buffer);
+      log('transferIn ok, byteLength=', arr.length, 'data=', Array.from(arr).map(b=>b.toString(16).padStart(2,'0')).join(' '));
+    } else {
+      log('transferIn status', result.status);
+    }
+  }catch(e){ log('transferIn error:', e.message || e); }
+}
+
+document.getElementById('btnRequest').addEventListener('click', requestDevice);
+document.getElementById('btnList').addEventListener('click', listDevices);
+document.getElementById('btnClose').addEventListener('click', closeDevice);
+document.getElementById('btnSend').addEventListener('click', sendTransfer);
+document.getElementById('btnRecv').addEventListener('click', recvTransfer);
+
+// Feature detection
+if(!('usb' in navigator)){
+  log('WebUSB not supported in this browser.');
+  document.getElementById('btnRequest').disabled = true;
+}
+</script>
+</body>
+</html>
